@@ -1,7 +1,7 @@
 -- ============================================================
 -- 知测 · 多专业在线考试平台
 -- 数据库初始化脚本 (PostgreSQL 16+)
--- 优化版 v2 — 生产级
+-- 优化版 v3 — 学院 / 行政班 / 合班开课
 -- ============================================================
 -- 使用方式:
 --   1. 先手动建库:
@@ -34,21 +34,34 @@ END;
 $$ LANGUAGE plpgsql VOLATILE;
 
 -- ============================================================
--- 一、基础数据：专业 → 课程 → 知识域
+-- 一、组织与课程：学院 → 专业 → 课程 → 知识域
 -- ============================================================
 
-CREATE TABLE majors (
+CREATE TABLE colleges (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
     code            VARCHAR(20)  NOT NULL UNIQUE,
-    name            VARCHAR(100) NOT NULL,
+    name            VARCHAR(100) NOT NULL UNIQUE,
     short_name      VARCHAR(20),
-    faculty         VARCHAR(100),
     description     TEXT,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     sort_order      INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE majors (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    college_id      UUID NOT NULL REFERENCES colleges(id),
+    code            VARCHAR(20)  NOT NULL UNIQUE,
+    name            VARCHAR(100) NOT NULL,
+    short_name      VARCHAR(20),
+    description     TEXT,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    sort_order      INT NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_majors_college ON majors(college_id);
 
 CREATE TABLE courses (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
@@ -82,7 +95,7 @@ CREATE INDEX idx_kd_course ON knowledge_domains(course_id);
 CREATE INDEX idx_kd_parent ON knowledge_domains(parent_id);
 
 -- ============================================================
--- 二、用户与权限
+-- 二、学期、行政班、用户与开课（支持合班 + 多主讲）
 -- ============================================================
 
 CREATE TABLE semesters (
@@ -94,16 +107,21 @@ CREATE TABLE semesters (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- 行政班：学籍归属；grade 为入学年，如 2024
 CREATE TABLE classes (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
     major_id        UUID NOT NULL REFERENCES majors(id),
-    semester_id     UUID NOT NULL REFERENCES semesters(id),
     name            VARCHAR(100) NOT NULL,
-    grade           VARCHAR(10),
+    grade           VARCHAR(10)  NOT NULL,
     student_count   INT NOT NULL DEFAULT 0,
+    head_teacher_id UUID,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(major_id, semester_id, name)
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(major_id, grade, name)
 );
+CREATE INDEX idx_classes_major ON classes(major_id);
+CREATE INDEX idx_classes_grade ON classes(grade);
 
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
@@ -114,6 +132,7 @@ CREATE TABLE users (
     email           VARCHAR(200),
     phone           VARCHAR(20),
     avatar_url      VARCHAR(500),
+    college_id      UUID REFERENCES colleges(id),
     major_id        UUID REFERENCES majors(id),
     class_id        UUID REFERENCES classes(id),
     department      VARCHAR(100),
@@ -126,9 +145,14 @@ CREATE TABLE users (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_college ON users(college_id);
 CREATE INDEX idx_users_major ON users(major_id);
 CREATE INDEX idx_users_class ON users(class_id);
 CREATE INDEX idx_users_status ON users(status);
+
+ALTER TABLE classes
+    ADD CONSTRAINT fk_classes_head_teacher
+    FOREIGN KEY (head_teacher_id) REFERENCES users(id);
 
 CREATE TABLE role_permissions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
@@ -140,6 +164,7 @@ CREATE TABLE role_permissions (
     UNIQUE(role, resource, action)
 );
 
+-- 教师可授课程资质（可选）
 CREATE TABLE teacher_courses (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
     teacher_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -148,6 +173,66 @@ CREATE TABLE teacher_courses (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(teacher_id, course_id)
 );
+
+-- 教学班 / 开课：真正上课与排考单位（可合班）
+CREATE TABLE class_offerings (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    course_id       UUID NOT NULL REFERENCES courses(id),
+    semester_id     UUID NOT NULL REFERENCES semesters(id),
+    name            VARCHAR(200),
+    status          VARCHAR(20) NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active','closed','cancelled')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_offerings_course ON class_offerings(course_id);
+CREATE INDEX idx_offerings_semester ON class_offerings(semester_id);
+
+-- 开课 ↔ 行政班（N:N，支持合班）
+CREATE TABLE offering_classes (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    offering_id     UUID NOT NULL REFERENCES class_offerings(id) ON DELETE CASCADE,
+    class_id        UUID NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(offering_id, class_id)
+);
+CREATE INDEX idx_offering_classes_class ON offering_classes(class_id);
+
+-- 同一学期同一课程下，一个行政班只能进一个教学班
+CREATE OR REPLACE FUNCTION check_offering_class_unique()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM offering_classes oc
+        JOIN class_offerings o1 ON o1.id = oc.offering_id
+        JOIN class_offerings o2 ON o2.id = NEW.offering_id
+        WHERE oc.class_id = NEW.class_id
+          AND oc.offering_id <> NEW.offering_id
+          AND o1.semester_id = o2.semester_id
+          AND o1.course_id = o2.course_id
+    ) THEN
+        RAISE EXCEPTION '同一学期同一课程下，行政班只能加入一个教学班';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_offering_class_unique
+    BEFORE INSERT OR UPDATE ON offering_classes
+    FOR EACH ROW EXECUTE FUNCTION check_offering_class_unique();
+
+-- 开课 ↔ 授课老师（可多主讲 / 助教）
+CREATE TABLE offering_teachers (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
+    offering_id     UUID NOT NULL REFERENCES class_offerings(id) ON DELETE CASCADE,
+    teacher_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role            VARCHAR(20) NOT NULL DEFAULT 'instructor'
+                    CHECK (role IN ('instructor','assistant')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(offering_id, teacher_id)
+);
+CREATE INDEX idx_offering_teachers_teacher ON offering_teachers(teacher_id);
 
 -- ============================================================
 -- 三、题库核心
@@ -663,22 +748,72 @@ $$ LANGUAGE plpgsql STABLE;
 -- 十一、种子数据
 -- ============================================================
 
-INSERT INTO majors (code, name, short_name, faculty) VALUES
-    ('IOT',    '物联网工程',   '物联网', '信息工程学院'),
-    ('CS',     '计算机科学',   '计算机', '信息工程学院'),
-    ('ENG',    '英语/外语',    '外语',   '外国语学院'),
-    ('MATH',   '数学/物理',    '数理',   '理学院'),
-    ('MED',    '医学/护理',    '医学',   '医学院'),
-    ('ART',    '艺术/设计',    '艺术',   '艺术学院');
+INSERT INTO colleges (code, name, short_name, sort_order) VALUES
+    ('SIE',  '信息工程学院', '信工', 1),
+    ('SFL',  '外国语学院',   '外语', 2),
+    ('SCI',  '理学院',       '理学院', 3),
+    ('MED',  '医学院',       '医学院', 4),
+    ('ART',  '艺术学院',     '艺术', 5);
+
+INSERT INTO majors (college_id, code, name, short_name, sort_order)
+SELECT c.id, m.code, m.name, m.short_name, m.sort_order
+FROM (VALUES
+    ('SIE', 'IOT',  '物联网工程', '物联网', 1),
+    ('SIE', 'CS',   '计算机科学', '计算机', 2),
+    ('SFL', 'ENG',  '英语/外语',  '外语',   1),
+    ('SCI', 'MATH', '数学/物理',  '数理',   1),
+    ('MED', 'NURS', '医学/护理',  '医学',   1),
+    ('ART', 'DES',  '艺术/设计',  '艺术',   1)
+) AS m(college_code, code, name, short_name, sort_order)
+JOIN colleges c ON c.code = m.college_code;
 
 INSERT INTO semesters (name, start_date, end_date, is_current) VALUES
     ('2025-2026-1', '2025-09-01', '2026-01-15', TRUE),
     ('2025-2026-2', '2026-02-20', '2026-07-10', FALSE);
 
+INSERT INTO courses (major_id, code, name, credit, semester)
+SELECT maj.id, c.code, c.name, c.credit, c.semester
+FROM (VALUES
+    ('IOT', 'IOT101', '物联网导论',     3.0, '1'),
+    ('IOT', 'IOT201', '传感器与检测',   3.5, '3'),
+    ('IOT', 'IOT301', '嵌入式系统',     4.0, '5'),
+    ('CS',  'CS101',  '程序设计基础',   4.0, '1'),
+    ('CS',  'CS201',  '数据结构',       3.5, '3')
+) AS c(major_code, code, name, credit, semester)
+JOIN majors maj ON maj.code = c.major_code;
+
+INSERT INTO classes (major_id, name, grade, student_count)
+SELECT maj.id, cl.name, cl.grade, cl.student_count
+FROM (VALUES
+    ('IOT', '物联2401', '2024', 45),
+    ('IOT', '物联2402', '2024', 42),
+    ('CS',  '计科2401', '2024', 48),
+    ('CS',  '计科2301', '2023', 40)
+) AS cl(major_code, name, grade, student_count)
+JOIN majors maj ON maj.code = cl.major_code;
+
+-- 示例合班开课：物联网导论 = 物联2401 + 物联2402
+INSERT INTO class_offerings (course_id, semester_id, name)
+SELECT c.id, s.id, '物联网导论 · 合班A'
+FROM courses c
+JOIN majors m ON m.id = c.major_id AND m.code = 'IOT'
+JOIN semesters s ON s.name = '2025-2026-1'
+WHERE c.code = 'IOT101';
+
+INSERT INTO offering_classes (offering_id, class_id)
+SELECT o.id, cl.id
+FROM class_offerings o
+JOIN courses c ON c.id = o.course_id AND c.code = 'IOT101'
+JOIN classes cl ON cl.name IN ('物联2401', '物联2402');
+
 INSERT INTO role_permissions (role, resource, action, description) VALUES
     ('admin',   'system',     'manage',    '系统全局管理'),
     ('admin',   'users',      'manage',    '用户与班级管理'),
+    ('admin',   'colleges',   'manage',    '学院管理'),
     ('admin',   'majors',     'manage',    '专业管理'),
+    ('admin',   'courses',    'manage',    '课程管理'),
+    ('admin',   'classes',    'manage',    '行政班管理'),
+    ('admin',   'offerings',  'manage',    '开课与合班安排'),
     ('admin',   'semesters',  'manage',    '学期管理'),
     ('admin',   'audit_logs', 'read',      '查看操作日志'),
     ('admin',   'backup',     'manage',    '数据备份与恢复'),
@@ -697,9 +832,13 @@ INSERT INTO role_permissions (role, resource, action, description) VALUES
     ('student', 'wrongbook',  'read_own',  '查看自己的错题本');
 
 SELECT '========================================' AS info;
-SELECT '  知测数据库初始化完成 (v2 优化版)！' AS status;
+SELECT '  知测数据库初始化完成 (v3 学院/合班)！' AS status;
 SELECT '========================================' AS info;
 SELECT
+    (SELECT COUNT(*) FROM colleges) AS colleges_count,
     (SELECT COUNT(*) FROM majors) AS majors_count,
+    (SELECT COUNT(*) FROM courses) AS courses_count,
+    (SELECT COUNT(*) FROM classes) AS classes_count,
+    (SELECT COUNT(*) FROM class_offerings) AS offerings_count,
     (SELECT COUNT(*) FROM semesters) AS semesters_count,
     (SELECT COUNT(*) FROM role_permissions) AS permissions_count;

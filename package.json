@@ -38,5 +38,16 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.8.2"
-  }
+  },
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/issert99/iot-trainer-exam-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "bugs": {
+    "url": "https://github.com/issert99/iot-trainer-exam-backend/issues"
+  },
+  "homepage": "https://github.com/issert99/iot-trainer-exam-backend#readme"
 }
