@@ -242,9 +242,10 @@ CREATE TABLE question_templates (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
     name            VARCHAR(200) NOT NULL,
     type            VARCHAR(30)  NOT NULL,
+    college_id      UUID REFERENCES colleges(id),
     major_id        UUID REFERENCES majors(id),
     course_id       UUID REFERENCES courses(id),
-    scope           VARCHAR(20) NOT NULL DEFAULT 'public' CHECK (scope IN ('public','major','course','private')),
+    scope           VARCHAR(20) NOT NULL DEFAULT 'public' CHECK (scope IN ('public','college','major','course','private')),
     default_score   NUMERIC(5,1) NOT NULL DEFAULT 2,
     components      JSONB NOT NULL DEFAULT '[]',
     usage_count     INT NOT NULL DEFAULT 0,
@@ -253,6 +254,7 @@ CREATE TABLE question_templates (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX idx_qtemplates_college ON question_templates(college_id);
 CREATE INDEX idx_qtemplates_major ON question_templates(major_id);
 CREATE INDEX idx_qtemplates_course ON question_templates(course_id);
 CREATE INDEX idx_qtemplates_scope ON question_templates(scope);

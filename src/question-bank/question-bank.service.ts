@@ -11,6 +11,12 @@ type ComponentNode = {
   type?: string;
 };
 
+type TemplateScope = {
+  collegeId: null | string;
+  majorId: null | string;
+  scope: 'college' | 'course' | 'major' | 'private' | 'public';
+};
+
 @Injectable()
 export class QuestionBankService {
   constructor(private readonly db: DatabaseService) {}
@@ -73,10 +79,47 @@ export class QuestionBankService {
     return walk(components) || 'composite';
   }
 
+  private resolveTemplateScope(rawScope?: string): TemplateScope {
+    const raw = String(rawScope || 'public').trim();
+    if (raw.startsWith('college:')) {
+      const collegeId = raw.slice('college:'.length);
+      if (!collegeId) throw new BadRequestException('请选择模板所属学院');
+      return { scope: 'college', collegeId, majorId: null };
+    }
+    if (raw.startsWith('major:')) {
+      const majorId = raw.slice('major:'.length);
+      if (!majorId) throw new BadRequestException('请选择模板所属专业');
+      return { scope: 'major', collegeId: null, majorId };
+    }
+    if (raw === 'course' || raw === 'private' || raw === 'major') {
+      return { scope: raw, collegeId: null, majorId: null };
+    }
+    return { scope: 'public', collegeId: null, majorId: null };
+  }
+
+  private templateScopeSql(alias = 't') {
+    return `CASE
+      WHEN ${alias}.scope = 'college' AND ${alias}.college_id IS NOT NULL
+        THEN 'college:' || ${alias}.college_id::text
+      WHEN ${alias}.scope = 'major' AND ${alias}.major_id IS NOT NULL
+        THEN 'major:' || ${alias}.major_id::text
+      ELSE ${alias}.scope
+    END`;
+  }
+
   async ensureSchema() {
     await this.db.query(`
       ALTER TABLE question_templates
-        ADD COLUMN IF NOT EXISTS description TEXT
+        ADD COLUMN IF NOT EXISTS description TEXT;
+      ALTER TABLE question_templates
+        ADD COLUMN IF NOT EXISTS college_id UUID REFERENCES colleges(id);
+      ALTER TABLE question_templates
+        DROP CONSTRAINT IF EXISTS question_templates_scope_check;
+      ALTER TABLE question_templates
+        ADD CONSTRAINT question_templates_scope_check
+        CHECK (scope IN ('public','college','major','course','private'));
+      CREATE INDEX IF NOT EXISTS idx_qtemplates_college
+        ON question_templates(college_id)
     `);
   }
 
@@ -100,10 +143,16 @@ export class QuestionBankService {
     const keyword = (query.keyword || '').trim();
     const params = [keyword, `%${keyword}%`];
     const dataSql = `
-      SELECT t.id, t.name, t.description, t.type, t.scope, t.components,
+      SELECT t.id, t.name, t.description, t.type,
+             ${this.templateScopeSql('t')} AS scope, t.components,
              t.default_score, t.usage_count, t.is_active,
              to_char(t.updated_at, 'YYYY-MM-DD') AS updated_at,
-             jsonb_array_length(COALESCE(t.components, '[]'::jsonb)) AS component_count
+             CASE
+               WHEN jsonb_typeof(COALESCE(t.components, '[]'::jsonb)) = 'array'
+                 THEN jsonb_array_length(COALESCE(t.components, '[]'::jsonb))
+               WHEN t.components IS NULL THEN 0
+               ELSE 1
+             END AS component_count
       FROM question_templates t
       WHERE t.is_active = TRUE
         AND ($1 = '' OR t.name ILIKE $2 OR COALESCE(t.description, '') ILIKE $2)
@@ -113,7 +162,8 @@ export class QuestionBankService {
 
   async getTemplate(id: string) {
     const result = await this.db.query(
-      `SELECT t.id, t.name, t.description, t.type, t.scope, t.components,
+      `SELECT t.id, t.name, t.description, t.type,
+              ${this.templateScopeSql('t')} AS scope, t.components,
               t.default_score, t.usage_count, t.is_active,
               to_char(t.updated_at, 'YYYY-MM-DD') AS updated_at
        FROM question_templates t
@@ -141,15 +191,19 @@ export class QuestionBankService {
     }
     const type = this.primaryType(components as ComponentNode[]);
     const defaultScore = this.sumScore(components as ComponentNode[]);
+    const templateScope = this.resolveTemplateScope(body.scope);
     const result = await this.db.query(
       `INSERT INTO question_templates
-         (name, type, scope, description, default_score, components, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+         (name, type, scope, college_id, major_id, description,
+          default_score, components, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
        RETURNING id`,
       [
         name,
         type,
-        body.scope || 'public',
+        templateScope.scope,
+        templateScope.collegeId,
+        templateScope.majorId,
         String(body.description || '').trim() || null,
         defaultScore,
         JSON.stringify(components),
@@ -177,21 +231,27 @@ export class QuestionBankService {
     }
     const type = this.primaryType(components as ComponentNode[]);
     const defaultScore = this.sumScore(components as ComponentNode[]);
+    const templateScope = this.resolveTemplateScope(body.scope);
     await this.db.query(
       `UPDATE question_templates
        SET name = $2,
            type = $3,
            scope = $4,
-           description = $5,
-           default_score = $6,
-           components = $7::jsonb,
+           college_id = $5,
+           major_id = $6,
+           course_id = NULL,
+           description = $7,
+           default_score = $8,
+           components = $9::jsonb,
            updated_at = NOW()
        WHERE id = $1`,
       [
         id,
         name,
         type,
-        body.scope || 'public',
+        templateScope.scope,
+        templateScope.collegeId,
+        templateScope.majorId,
         String(body.description || '').trim() || null,
         defaultScore,
         JSON.stringify(components),
