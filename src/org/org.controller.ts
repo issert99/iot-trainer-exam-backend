@@ -1,4 +1,13 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiResponse } from '../common/dto/api-response';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrgService } from './org.service';
@@ -13,9 +22,20 @@ export class OrgController {
     return ApiResponse.ok(await this.orgService.getTree());
   }
 
+  @Get('options')
+  async options() {
+    return ApiResponse.ok(await this.orgService.listOptions());
+  }
+
   @Post('node')
   async addNode(
-    @Body() body: { parentType: 'all' | 'college' | 'major'; parentId?: string; name: string; code?: string },
+    @Body()
+    body: {
+      parentType: 'all' | 'college' | 'major';
+      parentId?: string;
+      name: string;
+      code?: string;
+    },
   ) {
     return ApiResponse.ok(await this.orgService.addNode(body), '新增节点成功');
   }
@@ -32,6 +52,11 @@ export class OrgController {
   @Get('majors')
   async majors(@Query() query: Record<string, string>) {
     return ApiResponse.ok(await this.orgService.listMajors(query));
+  }
+
+  @Get('colleges')
+  async colleges(@Query() query: Record<string, string>) {
+    return ApiResponse.ok(await this.orgService.listColleges(query));
   }
 
   @Get('classes')
@@ -54,6 +79,48 @@ export class OrgController {
     return ApiResponse.ok(await this.orgService.listCourses(query));
   }
 
+  @Post('create/:tab')
+  async create(
+    @Param('tab') tab: string,
+    @Body() body: Record<string, any>,
+  ) {
+    return ApiResponse.ok(await this.orgService.createRow(tab, body), '新建成功');
+  }
+
+  @Post('import/:tab')
+  async importData(
+    @Param('tab') tab: string,
+    @Body() body: { rows?: Record<string, any>[] },
+  ) {
+    return ApiResponse.ok(
+      await this.orgService.importRows(tab, body.rows || []),
+      '导入完成',
+    );
+  }
+
+  @Get('export/:tab')
+  async exportData(
+    @Param('tab') tab: string,
+    @Query() query: Record<string, string>,
+  ) {
+    if (tab === 'students') {
+      return ApiResponse.ok(await this.orgService.listStudents(query));
+    }
+    if (tab === 'teachers') {
+      return ApiResponse.ok(await this.orgService.listTeachers(query));
+    }
+    if (tab === 'courses') {
+      return ApiResponse.ok(await this.orgService.listCourses(query));
+    }
+    if (tab === 'classes') {
+      return ApiResponse.ok(await this.orgService.listClasses(query));
+    }
+    if (tab === 'colleges') {
+      return ApiResponse.ok(await this.orgService.listColleges(query));
+    }
+    return ApiResponse.ok(await this.orgService.listMajors(query));
+  }
+
   @Get(':tab/:id/detail')
   async detail(@Param('tab') tab: string, @Param('id') id: string) {
     return ApiResponse.ok(await this.orgService.getDetail(tab, id));
@@ -66,25 +133,13 @@ export class OrgController {
   }
 
   @Post('batch-delete/:tab')
-  async batchDelete(@Param('tab') tab: string, @Body() body: { ids: string[] }) {
+  async batchDelete(
+    @Param('tab') tab: string,
+    @Body() body: { ids: string[] },
+  ) {
     for (const id of body.ids || []) {
       await this.orgService.deleteRow(tab, id);
     }
     return ApiResponse.ok(true, '批量删除成功');
   }
-
-  @Post('import/:tab')
-  async importData(@Param('tab') tab: string) {
-    return ApiResponse.ok({ count: 0, tab }, '导入功能已就绪（待接文件解析）');
-  }
-
-  @Get('export/:tab')
-  async exportData(@Param('tab') tab: string, @Query() query: Record<string, string>) {
-    if (tab === 'students') return ApiResponse.ok(await this.orgService.listStudents(query));
-    if (tab === 'teachers') return ApiResponse.ok(await this.orgService.listTeachers(query));
-    if (tab === 'courses') return ApiResponse.ok(await this.orgService.listCourses(query));
-    if (tab === 'classes') return ApiResponse.ok(await this.orgService.listClasses(query));
-    return ApiResponse.ok(await this.orgService.listMajors(query));
-  }
 }
-

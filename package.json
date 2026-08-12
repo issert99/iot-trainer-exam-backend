@@ -9,7 +9,8 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
-    "seed:users": "ts-node -r tsconfig-paths/register scripts/seed-users.ts"
+    "seed:users": "ts-node -r tsconfig-paths/register scripts/seed-users.ts",
+    "seed:org": "ts-node -r tsconfig-paths/register scripts/seed-org-rich.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
